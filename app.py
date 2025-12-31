@@ -4,6 +4,7 @@ import threading
 import os
 import logging
 
+# ================= CONFIG =================
 CACHE_DIR = os.path.join(os.getcwd(), "cache")
 WEB_TARGET = "https://multimovies.golf/"
 
@@ -12,66 +13,97 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class Renewer():
+# ================= GLOBAL SESSION (IMPORTANT) =================
+session = cfSession(
+    directory=cfDirectory(CACHE_DIR),
+    headless_mode=True
+)
+
+# ================= RENEWER =================
+class Renewer:
     def __init__(self, target: str):
-        self.renewing = False
         self.target = target
+        self.renewing = False
         self._thread = None
 
-    def _renew_backend(self, session: cfSession):
+    def _renew_backend(self):
         self.renewing = True
         try:
             resp = session.get(self.target)
-            logger.info(f"Renewed cookies, status: {resp.status_code}")
+            logger.info(f"Cookie renewed, status={resp.status_code}")
         except Exception as e:
             logger.error(f"Renew error: {e}")
         finally:
             self.renewing = False
-    
-    def renew(self, session: cfSession):
+
+    def renew(self):
         if self.renewing:
             return {"status": False, "reason": "Renew already running"}
 
-        response = session.session.get(self.target)
-        if response.status_code == 200:
-            return {"status": False, "reason": "Cookie already valid"}
+        try:
+            r = session.session.get(self.target, timeout=10)
+            if r.status_code == 200:
+                return {"status": False, "reason": "Cookie already valid"}
+        except:
+            pass
 
         self._thread = threading.Thread(
-            target=self._renew_backend, args=(session,)
+            target=self._renew_backend, daemon=True
         )
         self._thread.start()
         return {"status": True, "reason": "Cookie invalid, regenerating"}
 
-def isSiteValid(url):
-    response = session.session.get(url)
-    return response.status_code == 200
+renewer = Renewer(target=WEB_TARGET)
 
-def reverse_proxy(url, params=None):
+# ================= HELPERS =================
+def isSiteValid(url):
+    try:
+        r = session.session.get(url, timeout=10)
+        return r.status_code == 200
+    except:
+        return False
+
+def reverse_proxy(path, params=None):
     if params:
         query = "&".join([f"{k}={v}" for k, v in params.items()])
-        target_url = f"{WEB_TARGET}{url}?{query}"
+        target_url = f"{WEB_TARGET}{path}?{query}"
     else:
-        target_url = WEB_TARGET + url
+        target_url = WEB_TARGET + path
 
     res = session.get(target_url)
     return res.content
 
+# ================= MIDDLEWARE =================
 @app.before_request
 def before_request():
-    if not isSiteValid(WEB_TARGET):
-        renewer.renew(session)
+    # 🔥 IMPORTANT: skip these to avoid crash
+    if request.method == "HEAD":
+        return
+    if request.path in ("/getcookie", "/health"):
+        return
 
+    try:
+        if not isSiteValid(WEB_TARGET):
+            renewer.renew()
+    except Exception as e:
+        logger.error(f"before_request error: {e}")
+        return  # NEVER break request
+
+# ================= ROUTES =================
 @app.route("/getcookie", methods=["GET"])
 def getcookie():
-    return jsonify(renewer.renew(session))
+    return jsonify(renewer.renew())
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def proxy(path):
-    data = reverse_proxy("/" + path, request.args)
-    return Response(data, content_type="text/html")
+    content = reverse_proxy("/" + path, request.args)
+    return Response(content, content_type="text/html")
 
+# ================= LOCAL RUN ONLY =================
 if __name__ == "__main__":
-    session = cfSession(directory=cfDirectory(CACHE_DIR), headless_mode=True)
-    renewer = Renewer(target=WEB_TARGET)
     app.run("0.0.0.0", port=8080)
