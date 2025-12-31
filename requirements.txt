@@ -2,4 +2,4 @@ CFSession==1.5.0
 flask
 beautifulsoup4
 gunicorn
-blinker
+blinker==1.6.2
